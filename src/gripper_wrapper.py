@@ -42,6 +42,15 @@ def position_range(attrs: Mapping[str, Any]) -> Tuple[float, float]:
     return lo, hi
 
 
+def command_range(attrs: Mapping[str, Any]) -> Tuple[float, float]:
+    """(open_value, closed_value): the DoCommand values for fully open and fully closed."""
+    open_v = float(attrs.get("open_value", 0))
+    closed_v = float(attrs.get("closed_value", 1))
+    if open_v == closed_v:
+        raise ValueError(f"'open_value' and 'closed_value' must differ (both {open_v:g})")
+    return open_v, closed_v
+
+
 class LatestWins:
     """Runs send(value) in the background; values submitted while one runs collapse to the newest."""
 
@@ -81,11 +90,13 @@ class GripperWrapper(Gripper, EasyResource):
         if not isinstance(raw, str) or not raw:
             raise ValueError("'gripper' (name of the viam:ufactory:gripper to wrap) is required")
         position_range(attrs)
+        command_range(attrs)
         return [raw], []
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> None:
         attrs = struct_to_dict(config.attributes)
         self.min_position, self.max_position = position_range(attrs)
+        self.open_value, self.closed_value = command_range(attrs)
         # Skip writes closer than this to the last one; the controller writes every tick.
         self.deadband_steps = float(attrs.get("deadband_steps", 10))
         self.raw = next((v for k, v in dependencies.items() if k.name == attrs["gripper"]), None)
@@ -168,9 +179,11 @@ class GripperWrapper(Gripper, EasyResource):
     ) -> Mapping[str, ValueTypes]:
         if command.get("get"):
             resp = await self.raw.do_command({"get": True})
-            return {"position": to_unit(float(resp["pos"]), self.min_position, self.max_position)}
+            closed = to_unit(float(resp["pos"]), self.min_position, self.max_position)
+            return {"position": self.open_value + closed * (self.closed_value - self.open_value)}
         if "set" in command:
-            steps = to_raw(float(command["set"]), self.min_position, self.max_position)
+            closed = (float(command["set"]) - self.open_value) / (self.closed_value - self.open_value)
+            steps = to_raw(closed, self.min_position, self.max_position)
             if self.last_sent is None or abs(steps - self.last_sent) >= self.deadband_steps:
                 self.last_sent = steps
                 self.sender.submit(steps)

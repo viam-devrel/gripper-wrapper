@@ -104,6 +104,33 @@ def test_min_max_config_applied():
     asyncio.run(run())
 
 
+def test_command_scale_configurable():
+    async def run():
+        raw = FakeRaw(pos=0, set_delay=0)
+        w = make(raw, open_value=100, closed_value=0)  # inverted: 100 = open, 0 = closed
+        assert await w.do_command({"get": True}) == {"position": 0.0}
+        await w.do_command({"set": 100})
+        await asyncio.sleep(0.05)
+        await w.do_command({"set": 25})
+        await asyncio.sleep(0.05)
+        await w.do_command({"set": 150})  # past open clamps to open
+        await asyncio.sleep(0.05)
+        assert raw.sets == [840.0, 210.0, 840.0], raw.sets
+
+    asyncio.run(run())
+
+
+def test_validate_rejects_equal_command_values():
+    s = Struct()
+    s.update({"gripper": "gripper-raw", "open_value": 1, "closed_value": 1})
+    try:
+        GripperWrapper.validate_config(ComponentConfig(name="gripper", attributes=s))
+    except ValueError as e:
+        assert "open_value" in str(e)
+        return
+    raise AssertionError("open_value == closed_value was accepted")
+
+
 def test_full_open_still_sets_max():
     async def run():
         raw = FakeRaw(set_delay=0)
