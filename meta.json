@@ -3,12 +3,12 @@
   "module_id": "devrel:gripper-wrapper",
   "visibility": "public",
   "url": "https://github.com/viam-devrel/gripper-wrapper",
-  "description": "Gripper proxy for a uFactory gripper: DoCommand get/set on a 0-1 scale (0 = open) with a non-blocking set, for VLA controllers.",
+  "description": "Transparent proxy for a uFactory gripper: same DoCommand protocol, with a non-blocking set and position limits, for VLA controllers.",
   "models": [
     {
       "api": "rdk:component:gripper",
       "model": "devrel:gripper-wrapper:gripper",
-      "short_description": "uFactory gripper proxy with 0-1 (0 = open) DoCommand get/set and a non-blocking set",
+      "short_description": "Transparent uFactory gripper proxy with a non-blocking DoCommand set and min/max position limits",
       "markdown_link": "README.md#model-devrelgripper-wrappergripper"
     }
   ],

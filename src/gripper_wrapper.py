@@ -1,11 +1,14 @@
-"""Gripper proxy that puts a uFactory gripper on the 0-1 scale (0 = open) the vla controller uses.
+"""Transparent proxy for viam:ufactory:gripper that makes DoCommand "set" non-blocking.
 
-Every Gripper API call and every other DoCommand is forwarded to the wrapped gripper. DoCommand
-{"get": true} -> {"position": 0..1}; {"set": v} returns at once and moves the gripper in the
-background, newest command wins. viam:ufactory:gripper's own "set" blocks until the jaws settle.
+Speaks the wrapped gripper's own protocol and units, so a client (e.g. the vla controller's
+do_command adapter) is configured identically whether it targets this or the raw gripper.
+{"set": v} is clamped to [min_position, max_position], returns at once, and moves the gripper
+in the background, newest command wins; viam:ufactory:gripper's own "set" blocks until the
+jaws settle. Everything else, including {"get": true}, is forwarded unchanged.
 """
 
 import asyncio
+import math
 from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from viam.components.gripper import Gripper
@@ -20,35 +23,13 @@ from viam.utils import ValueTypes, struct_to_dict
 LOGGER = getLogger(__name__)
 
 
-def to_unit(pos: float, lo: float, hi: float) -> float:
-    """Raw jaw position (hi = open, lo = closed) -> 0..1 with 0 = open."""
-    return min(1.0, max(0.0, (hi - pos) / (hi - lo)))
-
-
-def to_raw(v: float, lo: float, hi: float) -> int:
-    """0..1 with 0 = open -> raw jaw position in lo..hi."""
-    return round(hi - (hi - lo) * min(1.0, max(0.0, v)))
-
-
 def position_range(attrs: Mapping[str, Any]) -> Tuple[float, float]:
-    """(min_position, max_position) from config: the raw positions mapped to 1 (closed) and 0 (open)."""
-    # Calibration knob: the G2 opens fully at 840 (viam-ufactory-xarm gripper.go fullyOpenPosition);
-    # its set only returns early within +/-6 of the goal, so a goal it can't reach waits ~1 s.
-    # full_open is the older name for max_position; existing configs still use it.
-    lo = float(attrs.get("min_position", 0))
-    hi = float(attrs.get("max_position", attrs.get("full_open", 840)))
+    """(min_position, max_position) in the wrapped gripper's raw units; unset ends don't limit."""
+    lo = float(attrs.get("min_position", -math.inf))
+    hi = float(attrs.get("max_position", math.inf))
     if lo >= hi:
         raise ValueError(f"'min_position' ({lo:g}) must be less than 'max_position' ({hi:g})")
     return lo, hi
-
-
-def command_range(attrs: Mapping[str, Any]) -> Tuple[float, float]:
-    """(open_value, closed_value): the DoCommand values for fully open and fully closed."""
-    open_v = float(attrs.get("open_value", 0))
-    closed_v = float(attrs.get("closed_value", 1))
-    if open_v == closed_v:
-        raise ValueError(f"'open_value' and 'closed_value' must differ (both {open_v:g})")
-    return open_v, closed_v
 
 
 class LatestWins:
@@ -90,24 +71,23 @@ class GripperWrapper(Gripper, EasyResource):
         if not isinstance(raw, str) or not raw:
             raise ValueError("'gripper' (name of the viam:ufactory:gripper to wrap) is required")
         position_range(attrs)
-        command_range(attrs)
         return [raw], []
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> None:
         attrs = struct_to_dict(config.attributes)
         self.min_position, self.max_position = position_range(attrs)
-        self.open_value, self.closed_value = command_range(attrs)
         # Skip writes closer than this to the last one; the controller writes every tick.
+        # The G2's set only returns early within +/-6 of the goal, so tiny moves cost ~1 s each.
         self.deadband_steps = float(attrs.get("deadband_steps", 10))
         self.raw = next((v for k, v in dependencies.items() if k.name == attrs["gripper"]), None)
         if self.raw is None:
             raise ValueError(f"dependency {attrs['gripper']!r} not found")
-        self.last_sent: Optional[int] = None
+        self.last_sent: Optional[float] = None
         self.sender = LatestWins(self._set)
 
-    async def _set(self, steps: int) -> None:
+    async def _set(self, command: Dict[str, Any]) -> None:
         try:
-            await self.raw.do_command({"set": float(steps)})
+            await self.raw.do_command(command)
         except Exception:
             self.last_sent = None  # failed: let the next command through the deadband
             raise
@@ -177,15 +157,11 @@ class GripperWrapper(Gripper, EasyResource):
     async def do_command(
         self, command: Mapping[str, ValueTypes], *, timeout: Optional[float] = None, **kwargs
     ) -> Mapping[str, ValueTypes]:
-        if command.get("get"):
-            resp = await self.raw.do_command({"get": True})
-            closed = to_unit(float(resp["pos"]), self.min_position, self.max_position)
-            return {"position": self.open_value + closed * (self.closed_value - self.open_value)}
         if "set" in command:
-            closed = (float(command["set"]) - self.open_value) / (self.closed_value - self.open_value)
-            steps = to_raw(closed, self.min_position, self.max_position)
-            if self.last_sent is None or abs(steps - self.last_sent) >= self.deadband_steps:
-                self.last_sent = steps
-                self.sender.submit(steps)
+            goal = min(self.max_position, max(self.min_position, float(command["set"])))
+            if self.last_sent is None or abs(goal - self.last_sent) >= self.deadband_steps:
+                self.last_sent = goal
+                # Keep any other keys the caller sent alongside "set" (e.g. controller write_args).
+                self.sender.submit({**command, "set": goal})
             return {}
         return await self.raw.do_command(command, timeout=timeout)
