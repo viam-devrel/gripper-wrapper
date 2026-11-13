@@ -44,8 +44,10 @@ What it adds:
 Use the same `gripper` block you would for the raw uFactory gripper, pointed at the wrapper:
 
 ```json
-"gripper": { "type": "do_command", "name": "gripper-wrapper", "open_value": 840, "closed_value": 2, "read_key": "pos" }
+"gripper": { "type": "do_command", "name": "gripper-wrapper", "open_value": 840, "closed_value": 0, "read_key": "pos" }
 ```
+
+`0` is where the uFactory driver's `Grab` closes a G2; it closes a G1 to `2`.
 
 To record demonstrations, capture `gripper-wrapper` with method `DoCommand` and input `{"get": true}`.
 
