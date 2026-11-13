@@ -11,7 +11,7 @@ from viam.proto.common import ResourceName
 
 from viam.components.gripper import Gripper
 
-from gripper_wrapper import GripperWrapper, LatestWins, to_raw, to_unit
+from gripper_wrapper import GripperWrapper, LatestWins
 
 
 class FakeRaw:
@@ -75,13 +75,57 @@ def make(raw, **attrs):
     return GripperWrapper.new(cfg, {ResourceName(name="gripper-raw"): raw})
 
 
-def test_scale_round_trip():
-    assert to_unit(850, 850) == 0.0  # fully open
-    assert to_unit(0, 850) == 1.0  # fully closed
-    assert to_raw(0.0, 850) == 850
-    assert to_raw(1.0, 850) == 0
-    assert to_raw(to_unit(425, 850), 850) == 425
-    assert to_unit(900, 850) == 0.0 and to_raw(1.3, 850) == 0  # clamped
+def test_min_max_clamps_set():
+    async def run():
+        raw = FakeRaw(set_delay=0)
+        w = make(raw, min_position=100, max_position=700)
+        for v in (0, 400, 840):
+            await w.do_command({"set": v})
+            await asyncio.sleep(0.05)
+        assert raw.sets == [100.0, 400.0, 700.0], raw.sets
+
+    asyncio.run(run())
+
+
+def test_no_limits_by_default():
+    async def run():
+        raw = FakeRaw(set_delay=0)
+        w = make(raw)
+        await w.do_command({"set": 2})
+        await asyncio.sleep(0.05)
+        assert raw.sets == [2.0], raw.sets
+
+    asyncio.run(run())
+
+
+def test_set_keeps_extra_keys():
+    async def run():
+        raw = FakeRaw(set_delay=0)
+        seen = []
+        orig = raw.do_command
+
+        async def spy(cmd, **kw):
+            seen.append(dict(cmd))
+            return await orig(cmd, **kw)
+
+        raw.do_command = spy
+        w = make(raw, max_position=700)
+        await w.do_command({"set": 840, "speed": 5})
+        await asyncio.sleep(0.05)
+        assert seen == [{"set": 700.0, "speed": 5}], seen
+
+    asyncio.run(run())
+
+
+def test_validate_rejects_inverted_range():
+    s = Struct()
+    s.update({"gripper": "gripper-raw", "min_position": 500, "max_position": 500})
+    try:
+        GripperWrapper.validate_config(ComponentConfig(name="gripper", attributes=s))
+    except ValueError as e:
+        assert "min_position" in str(e)
+        return
+    raise AssertionError("min_position >= max_position was accepted")
 
 
 def test_validate_requires_gripper():
@@ -92,10 +136,10 @@ def test_validate_requires_gripper():
     raise AssertionError("missing 'gripper' attribute was accepted")
 
 
-def test_get_reports_unit_scale():
+def test_get_is_forwarded_unchanged():
     async def run():
-        w = make(FakeRaw(pos=0))
-        assert await w.do_command({"get": True}) == {"position": 1.0}
+        w = make(FakeRaw(pos=123), min_position=200)
+        assert await w.do_command({"get": True}) == {"pos": 123}
 
     asyncio.run(run())
 
@@ -105,7 +149,7 @@ def test_set_returns_at_once_and_newest_wins():
         raw = FakeRaw(set_delay=0.2)
         w = make(raw)
         loop = asyncio.get_running_loop()
-        for v in (0.2, 0.5, 0.8, 1.0):  # 4 ticks, 10 ms apart, while the first set is still moving
+        for v in (672, 420, 168, 0):  # 4 ticks, 10 ms apart, while the first set is still moving
             t0 = loop.time()
             assert await w.do_command({"set": v}) == {}
             assert loop.time() - t0 < 0.1, "set blocked"
@@ -120,8 +164,8 @@ def test_deadband_skips_tiny_moves():
     async def run():
         raw = FakeRaw(set_delay=0)
         w = make(raw, deadband_steps=10)
-        await w.do_command({"set": 0.5})
-        await w.do_command({"set": 0.505})  # ~4 steps away
+        await w.do_command({"set": 420})
+        await w.do_command({"set": 424})  # 4 steps away
         await asyncio.sleep(0.05)
         assert raw.sets == [420.0]
 
@@ -149,9 +193,9 @@ def test_failed_set_is_retried():
     async def run():
         raw = FlakyRaw(set_delay=0)
         w = make(raw)
-        await w.do_command({"set": 1.0})
+        await w.do_command({"set": 0})
         await asyncio.sleep(0.05)
-        await w.do_command({"set": 1.0})  # same goal again: must not be swallowed by the deadband
+        await w.do_command({"set": 0})  # same goal again: must not be swallowed by the deadband
         await asyncio.sleep(0.05)
         assert raw.sets == [0.0, 0.0], raw.sets
 
@@ -162,20 +206,12 @@ def test_close_drops_queued_set():
     async def run():
         raw = FakeRaw(set_delay=0.2)
         w = make(raw)
-        await w.do_command({"set": 0.0})
+        await w.do_command({"set": 840})
         await asyncio.sleep(0.01)  # first set is in flight
-        await w.do_command({"set": 1.0})  # queued behind it
+        await w.do_command({"set": 0})  # queued behind it
         await w.close()
         await asyncio.sleep(0.5)
         assert raw.sets == [840.0], raw.sets
-
-    asyncio.run(run())
-
-
-def test_get_accepts_truthy():
-    async def run():
-        w = make(FakeRaw(pos=0))
-        assert await w.do_command({"get": 1}) == {"position": 1.0}
 
     asyncio.run(run())
 
@@ -232,10 +268,10 @@ def test_typed_move_resets_deadband():
     async def run():
         raw = FakeRaw(set_delay=0)
         w = make(raw)
-        await w.do_command({"set": 0.5})
+        await w.do_command({"set": 420})
         await asyncio.sleep(0.05)
         await w.open()
-        await w.do_command({"set": 0.5})  # same goal as before the typed move: must be sent again
+        await w.do_command({"set": 420})  # same goal as before the typed move: must be sent again
         await asyncio.sleep(0.05)
         assert raw.sets == [420.0, 420.0], raw.sets
 
@@ -246,9 +282,9 @@ def test_stop_drops_queued_set():
     async def run():
         raw = FakeRaw(set_delay=0.2)
         w = make(raw)
-        await w.do_command({"set": 0.0})
+        await w.do_command({"set": 840})
         await asyncio.sleep(0.01)  # first set is in flight
-        await w.do_command({"set": 1.0})  # queued behind it
+        await w.do_command({"set": 0})  # queued behind it
         await w.stop()
         await asyncio.sleep(0.5)
         assert raw.sets == [840.0], raw.sets
