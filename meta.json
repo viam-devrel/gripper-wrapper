@@ -1,0 +1,24 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "devrel:gripper-wrapper",
+  "visibility": "public",
+  "url": "https://github.com/viam-devrel/gripper-wrapper",
+  "description": "Gripper proxy for a uFactory gripper: DoCommand get/set on a 0-1 scale (0 = open) with a non-blocking set, for VLA controllers.",
+  "models": [
+    {
+      "api": "rdk:component:gripper",
+      "model": "devrel:gripper-wrapper:gripper",
+      "short_description": "uFactory gripper proxy with 0-1 (0 = open) DoCommand get/set and a non-blocking set",
+      "markdown_link": "README.md#model-devrelgripper-wrappergripper"
+    }
+  ],
+  "entrypoint": "run.sh",
+  "build": {
+    "build": "COPYFILE_DISABLE=1 tar czf module.tar.gz --exclude __pycache__ meta.json run.sh requirements.txt src README.md",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
+  }
+}
