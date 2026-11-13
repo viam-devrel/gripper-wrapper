@@ -20,14 +20,26 @@ from viam.utils import ValueTypes, struct_to_dict
 LOGGER = getLogger(__name__)
 
 
-def to_unit(pos: float, full_open: float) -> float:
-    """Raw jaw position (full_open = open) -> 0..1 with 0 = open."""
-    return min(1.0, max(0.0, 1.0 - pos / full_open))
+def to_unit(pos: float, lo: float, hi: float) -> float:
+    """Raw jaw position (hi = open, lo = closed) -> 0..1 with 0 = open."""
+    return min(1.0, max(0.0, (hi - pos) / (hi - lo)))
 
 
-def to_raw(v: float, full_open: float) -> int:
-    """0..1 with 0 = open -> raw jaw position."""
-    return round(full_open * (1.0 - min(1.0, max(0.0, v))))
+def to_raw(v: float, lo: float, hi: float) -> int:
+    """0..1 with 0 = open -> raw jaw position in lo..hi."""
+    return round(hi - (hi - lo) * min(1.0, max(0.0, v)))
+
+
+def position_range(attrs: Mapping[str, Any]) -> Tuple[float, float]:
+    """(min_position, max_position) from config: the raw positions mapped to 1 (closed) and 0 (open)."""
+    # Calibration knob: the G2 opens fully at 840 (viam-ufactory-xarm gripper.go fullyOpenPosition);
+    # its set only returns early within +/-6 of the goal, so a goal it can't reach waits ~1 s.
+    # full_open is the older name for max_position; existing configs still use it.
+    lo = float(attrs.get("min_position", 0))
+    hi = float(attrs.get("max_position", attrs.get("full_open", 840)))
+    if lo >= hi:
+        raise ValueError(f"'min_position' ({lo:g}) must be less than 'max_position' ({hi:g})")
+    return lo, hi
 
 
 class LatestWins:
@@ -64,16 +76,16 @@ class GripperWrapper(Gripper, EasyResource):
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
-        raw = struct_to_dict(config.attributes).get("gripper")
+        attrs = struct_to_dict(config.attributes)
+        raw = attrs.get("gripper")
         if not isinstance(raw, str) or not raw:
             raise ValueError("'gripper' (name of the viam:ufactory:gripper to wrap) is required")
+        position_range(attrs)
         return [raw], []
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> None:
         attrs = struct_to_dict(config.attributes)
-        # Calibration knob: the G2 opens fully at 840 (viam-ufactory-xarm gripper.go fullyOpenPosition);
-        # its set only returns early within +/-6 of the goal, so a goal it can't reach waits ~1 s.
-        self.full_open = float(attrs.get("full_open", 840))
+        self.min_position, self.max_position = position_range(attrs)
         # Skip writes closer than this to the last one; the controller writes every tick.
         self.deadband_steps = float(attrs.get("deadband_steps", 10))
         self.raw = next((v for k, v in dependencies.items() if k.name == attrs["gripper"]), None)
@@ -156,9 +168,9 @@ class GripperWrapper(Gripper, EasyResource):
     ) -> Mapping[str, ValueTypes]:
         if command.get("get"):
             resp = await self.raw.do_command({"get": True})
-            return {"position": to_unit(float(resp["pos"]), self.full_open)}
+            return {"position": to_unit(float(resp["pos"]), self.min_position, self.max_position)}
         if "set" in command:
-            steps = to_raw(float(command["set"]), self.full_open)
+            steps = to_raw(float(command["set"]), self.min_position, self.max_position)
             if self.last_sent is None or abs(steps - self.last_sent) >= self.deadband_steps:
                 self.last_sent = steps
                 self.sender.submit(steps)

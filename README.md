@@ -20,15 +20,16 @@ The uFactory driver reports `{"pos": 0–840}` (840 = fully open). Its `{"set": 
 | Attribute | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `gripper` | string | yes | | Name of the `viam:ufactory:gripper` to wrap. |
-| `full_open` | number | no | `840` | Raw position when fully open. Set it to what the raw gripper's `{"get": true}` reports when open, if yours differs. |
+| `min_position` | number | no | `0` | Raw position mapped to 1 (closed). Raise it to stop `set 1` from closing the jaws all the way. |
+| `max_position` | number | no | `840` | Raw position mapped to 0 (open). Set it to what the raw gripper's `{"get": true}` reports when open, if yours differs, or lower it to limit how far the jaws open. `full_open` is accepted as an older name for it. |
 | `deadband_steps` | number | no | `10` | Skip a `set` closer than this (in raw steps) to the last one sent. |
 
 ### DoCommand
 
 | Command | Response | Behavior |
 |---|---|---|
-| `{"get": true}` | `{"position": 0..1}` | `1 - pos/full_open`, clamped; 0 = open, 1 = closed. |
-| `{"set": v}` with v in 0..1 | `{}` | Returns immediately. The gripper moves to `full_open·(1 − v)` in the background; while a move runs, newer commands replace older ones and only the newest is sent. A failed move is retried on the next `set`. |
+| `{"get": true}` | `{"position": 0..1}` | `(max_position − pos) / (max_position − min_position)`, clamped; 0 = open, 1 = closed. |
+| `{"set": v}` with v in 0..1 | `{}` | Returns immediately. The gripper moves to `max_position − v·(max_position − min_position)` in the background; while a move runs, newer commands replace older ones and only the newest is sent. A failed move is retried on the next `set`. |
 | anything else | the raw gripper's response | Forwarded unchanged, e.g. `set_gripper_speed`, `grab_with_torque`. |
 
 ### Gripper API

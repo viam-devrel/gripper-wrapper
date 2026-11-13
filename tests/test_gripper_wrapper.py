@@ -76,12 +76,54 @@ def make(raw, **attrs):
 
 
 def test_scale_round_trip():
-    assert to_unit(850, 850) == 0.0  # fully open
-    assert to_unit(0, 850) == 1.0  # fully closed
-    assert to_raw(0.0, 850) == 850
-    assert to_raw(1.0, 850) == 0
-    assert to_raw(to_unit(425, 850), 850) == 425
-    assert to_unit(900, 850) == 0.0 and to_raw(1.3, 850) == 0  # clamped
+    assert to_unit(850, 0, 850) == 0.0  # fully open
+    assert to_unit(0, 0, 850) == 1.0  # fully closed
+    assert to_raw(0.0, 0, 850) == 850
+    assert to_raw(1.0, 0, 850) == 0
+    assert to_raw(to_unit(425, 0, 850), 0, 850) == 425
+    assert to_unit(900, 0, 850) == 0.0 and to_raw(1.3, 0, 850) == 0  # clamped
+
+
+def test_scale_with_min_position():
+    assert to_raw(1.0, 100, 700) == 100
+    assert to_raw(0.0, 100, 700) == 700
+    assert to_raw(0.5, 100, 700) == 400
+    assert to_unit(400, 100, 700) == 0.5
+    assert to_unit(50, 100, 700) == 1.0  # below min clamps to closed
+
+
+def test_min_max_config_applied():
+    async def run():
+        raw = FakeRaw(pos=100, set_delay=0)
+        w = make(raw, min_position=100, max_position=700)
+        assert await w.do_command({"get": True}) == {"position": 1.0}
+        await w.do_command({"set": 0.0})
+        await asyncio.sleep(0.05)
+        assert raw.sets == [700.0], raw.sets
+
+    asyncio.run(run())
+
+
+def test_full_open_still_sets_max():
+    async def run():
+        raw = FakeRaw(set_delay=0)
+        w = make(raw, full_open=600)
+        await w.do_command({"set": 0.0})
+        await asyncio.sleep(0.05)
+        assert raw.sets == [600.0], raw.sets
+
+    asyncio.run(run())
+
+
+def test_validate_rejects_inverted_range():
+    s = Struct()
+    s.update({"gripper": "gripper-raw", "min_position": 500, "max_position": 500})
+    try:
+        GripperWrapper.validate_config(ComponentConfig(name="gripper", attributes=s))
+    except ValueError as e:
+        assert "min_position" in str(e)
+        return
+    raise AssertionError("min_position >= max_position was accepted")
 
 
 def test_validate_requires_gripper():
